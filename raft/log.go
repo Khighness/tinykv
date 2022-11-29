@@ -14,7 +14,11 @@
 
 package raft
 
-import pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+import (
+	"fmt"
+
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+)
 
 // RaftLog manage the log entries, its struct look like:
 //
@@ -71,8 +75,31 @@ func newLog(storage Storage) *RaftLog {
 	return raftLog
 }
 
+// commitTo advances committed index.
+func (l *RaftLog) commitTo(commitIndex uint64) {
+	if l.committed < commitIndex {
+		lastIndex := l.LastIndex()
+		if lastIndex < commitIndex {
+			panic(fmt.Sprintf("RaftLog|commitTo: commitIndex(%d) > lastIndex(%d)", commitIndex, lastIndex))
+		}
+		l.committed = commitIndex
+	}
+}
+
+// applyTo advances applied index.
+func (l *RaftLog) applyTo(applyIndex uint64) {
+	if applyIndex == 0 {
+		return
+	}
+	if applyIndex < l.applied || applyIndex > l.committed {
+		panic(fmt.Sprintf("RaftLog|applyTo: applyIndex(%d) is out of range [applied(%d), committed(%d)]",
+			applyIndex, l.applied, l.committed))
+	}
+	l.applied = applyIndex
+}
+
 // We need to compact the log entries in some point of time like
-// storage compact stabled log entries prevent the log entries
+// storage compact stabled log entries prevent the log entries.
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
@@ -94,7 +121,7 @@ func (l *RaftLog) maybeCompact() {
 func (l *RaftLog) toSLiceIndex(newFirstIndex uint64) int {
 	idx := int(newFirstIndex - l.FirstIndex)
 	if idx < 0 {
-		panic("RaftLog|toSliceIndex: index < 0")
+		panic(fmt.Sprintf("RaftLog|toSliceIndex: newFirstIndex(%d) < FirstIndex(%d)", newFirstIndex, l.FirstIndex))
 	}
 	return idx
 }

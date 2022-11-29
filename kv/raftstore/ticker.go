@@ -96,6 +96,7 @@ func newTickDriver(baseTickInterval time.Duration, router *router, storeTicker *
 	}
 }
 
+// run is a core function to drive logistic clock.
 func (r *tickDriver) run() {
 	timer := time.Tick(r.baseTickInterval)
 	for {
