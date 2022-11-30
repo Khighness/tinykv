@@ -647,14 +647,22 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 
 // handleRequestVoteResponse handles RequestVote RPC response.
 func (r *Raft) handleRequestVoteResponse(m pb.Message) {
-	r.votes[m.From] = !m.Reject
-	if m.Reject {
-		if m.Term > r.Term {
-			r.becomeFollower(m.Term, None)
-			return
+	if m.Term != None && m.Term < r.Term {
+		return
+	}
+	grant := 0
+	votes := len(r.votes)
+	quorum := len(r.Prs) / 2
+	for _, vote := range r.votes {
+		if vote {
+			grant++
 		}
 	}
-
+	if grant > quorum {
+		r.becomeLeader()
+	} else if votes-grant > quorum {
+		r.becomeFollower(r.Term, None)
+	}
 }
 
 // handleHeartbeat handles HeartBeat RPC request.
