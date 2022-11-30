@@ -200,7 +200,7 @@ func newRaft(c *Config) *Raft {
 	// Read `term`, `vote`, `committed` from raft hard state which is persisted.
 	raft.Term, raft.Vote, raft.RaftLog.committed = hardState.GetTerm(), hardState.GetVote(), hardState.GetCommit()
 	if c.Applied > 0 {
-		raft.RaftLog.applied = c.Applied
+		raft.RaftLog.applyTo(c.Applied)
 	}
 	return raft
 }
@@ -300,6 +300,7 @@ func (r *Raft) sendRequestVoteResponse(to uint64, reject bool) {
 		MsgType: pb.MessageType_MsgRequestVoteResponse,
 		To:      to,
 		From:    r.id,
+		Term:    r.Term,
 		Reject:  reject,
 	}
 	r.msgs = append(r.msgs, msg)
@@ -596,11 +597,26 @@ func (r *Raft) appendEntries(entries []*pb.Entry) {
 // doElection is used by follower or candidate to start an election.
 func (r *Raft) doElection() {
 	r.becomeCandidate()
+	r.heartbeatElapsed = 0
+	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
+	if len(r.Prs) == 1 {
+		r.becomeLeader()
+		return
+	}
+	lastIndex := r.RaftLog.LastIndex()
+	lastLogTerm, _ := r.RaftLog.Term(lastIndex)
+	for peer := range r.Prs {
+		if peer == r.id {
+			continue
+		}
+		r.sendRequestVote(peer, lastIndex, lastLogTerm)
+	}
 }
 
 // handleAppendEntries handles AppendEntries RPC request.
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+
 }
 
 // handleAppendEntriesResponse handles AppendEntries RPC response.
@@ -609,11 +625,35 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 
 // handleRequestVote handles RequestVote RPC request.
 func (r *Raft) handleRequestVote(m pb.Message) {
-
+	if m.Term != None && m.Term < r.Term {
+		r.sendRequestVoteResponse(m.From, true)
+		return
+	}
+	if r.Vote != None && r.Vote != m.From {
+		r.sendRequestVoteResponse(m.From, true)
+		return
+	}
+	lastIndex := r.RaftLog.LastIndex()
+	lastLogTerm, _ := r.RaftLog.Term(lastIndex)
+	if lastLogTerm > m.LogTerm || lastLogTerm == m.LogTerm && lastIndex > m.Index {
+		r.sendRequestVoteResponse(m.From, true)
+		return
+	}
+	r.Vote = m.From
+	r.electionElapsed = 0
+	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
+	r.sendRequestVoteResponse(m.From, false)
 }
 
 // handleRequestVoteResponse handles RequestVote RPC response.
 func (r *Raft) handleRequestVoteResponse(m pb.Message) {
+	r.votes[m.From] = !m.Reject
+	if m.Reject {
+		if m.Term > r.Term {
+			r.becomeFollower(m.Term, None)
+			return
+		}
+	}
 
 }
 
