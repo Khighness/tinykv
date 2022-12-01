@@ -15,7 +15,7 @@
 package raft
 
 import (
-	"fmt"
+	"github.com/pingcap-incubator/tinykv/log"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -54,7 +54,7 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
-	FirstIndex uint64
+	firstIndex uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -70,17 +70,28 @@ func newLog(storage Storage) *RaftLog {
 		applied:    firstIndex - 1,
 		stabled:    lastIndex,
 		entries:    entries,
-		FirstIndex: firstIndex,
+		firstIndex: firstIndex,
 	}
 	return raftLog
 }
 
+// stableTo advances stable index.
+func (l *RaftLog) stableTo(stableIndex uint64) {
+	if stableIndex > l.stabled {
+		lastIndex := l.LastIndex()
+		if stableIndex > lastIndex {
+			log.Panicf("RaftLog|stableTo: stableIndex(%d) > lastIndex(%d)", stableIndex, lastIndex)
+		}
+		l.stabled = stableIndex
+	}
+}
+
 // commitTo advances committed index.
 func (l *RaftLog) commitTo(commitIndex uint64) {
-	if l.committed < commitIndex {
+	if commitIndex > l.committed {
 		lastIndex := l.LastIndex()
-		if lastIndex < commitIndex {
-			panic(fmt.Sprintf("RaftLog|commitTo: commitIndex(%d) > lastIndex(%d)", commitIndex, lastIndex))
+		if commitIndex > lastIndex {
+			log.Panicf("RaftLog|commitTo: commitIndex(%d) > lastIndex(%d)", commitIndex, lastIndex)
 		}
 		l.committed = commitIndex
 	}
@@ -92,8 +103,8 @@ func (l *RaftLog) applyTo(applyIndex uint64) {
 		return
 	}
 	if applyIndex < l.applied || applyIndex > l.committed {
-		panic(fmt.Sprintf("RaftLog|applyTo: applyIndex(%d) is out of range [applied(%d), committed(%d)]",
-			applyIndex, l.applied, l.committed))
+		log.Panicf("RaftLog|applyTo: applyIndex(%d) is out of range [applied(%d), committed(%d)]",
+			applyIndex, l.applied, l.committed)
 	}
 	l.applied = applyIndex
 }
@@ -106,24 +117,15 @@ func (l *RaftLog) maybeCompact() {
 	firstIndex, _ := l.storage.FirstIndex()
 	// If older entries in storage module has been compacted into snapshot,
 	// then `storage.FirstIndex()` must be bigger than `l.FirstIndex`.
-	if firstIndex > l.FirstIndex {
+	if firstIndex > l.firstIndex {
 		if len(l.entries) > 0 {
 			// Delete entries that have been compressed into snapshots but still exist in memory.
-			entries := l.entries[l.toSLiceIndex(firstIndex):]
+			entries := l.entries[l.toSliceIndex(firstIndex):]
 			l.entries = make([]pb.Entry, len(entries))
 			copy(l.entries, entries)
 		}
-		l.FirstIndex = firstIndex
+		l.firstIndex = firstIndex
 	}
-}
-
-// toSLiceIndex returns the index of the first log entry who can not be removed in memory.
-func (l *RaftLog) toSLiceIndex(newFirstIndex uint64) int {
-	idx := int(newFirstIndex - l.FirstIndex)
-	if idx < 0 {
-		panic(fmt.Sprintf("RaftLog|toSliceIndex: newFirstIndex(%d) < FirstIndex(%d)", newFirstIndex, l.FirstIndex))
-	}
-	return idx
 }
 
 // allEntries return all the entries not compacted.
@@ -134,25 +136,30 @@ func (l *RaftLog) allEntries() []pb.Entry {
 	return l.entries[1:]
 }
 
-// unstableEntries return all the unstable entries
+// unstableEntries return all the unstable entries.
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
 	if len(l.entries) > 0 {
-		return l.entries[l.stabled-l.FirstIndex+1:]
+		return l.entries[l.stabled-l.firstIndex+1:]
 	}
 	return nil
 }
 
-// nextEnts returns all the committed but not applied entries
+// nextEnts returns all the committed but not applied entries.
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
 	if len(l.entries) > 0 {
-		return l.entries[l.applied-l.FirstIndex+1 : l.committed-l.FirstIndex+1]
+		return l.entries[l.applied-l.firstIndex+1 : l.committed-l.firstIndex+1]
 	}
 	return nil
 }
 
-// LastIndex return the last index of the log entries
+// FirstIndex returns the first index of the log entries.
+func (l *RaftLog) FirstIndex() uint64 {
+	return l.firstIndex
+}
+
+// LastIndex return the last index of the log entries.
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
 	// Get last index in memory.
@@ -170,12 +177,12 @@ func (l *RaftLog) LastIndex() uint64 {
 	return max(lastIndexInMemory, lastIndexInSnapshot)
 }
 
-// Term return the term of the entry in the given index
+// Term return the term of the entry in the given index.
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
 	// If the entry in the given index is in memory.
-	if len(l.entries) > 0 && i >= l.FirstIndex {
-		return l.entries[i-l.FirstIndex].Term, nil
+	if len(l.entries) > 0 && i >= l.firstIndex {
+		return l.entries[i-l.firstIndex].Term, nil
 	}
 	// If the entry in the given index is in snapshot.
 	term, err := l.storage.Term(i)
@@ -190,7 +197,16 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	return term, err
 }
 
+// toSliceIndex return the log offset in corresponding to the log index.
+func (l *RaftLog) toSliceIndex(logIndex uint64) int {
+	idx := int(logIndex - l.firstIndex)
+	if idx < 0 {
+		log.Panicf("RaftLog|toSliceIndex: logIndex(%d) < firstIndex(%d)", logIndex, l.firstIndex)
+	}
+	return idx
+}
+
 // toEntryIndex returns the index of log entry corresponding to the offset.
 func (l *RaftLog) toEntryIndex(offset int) uint64 {
-	return uint64(offset) + l.FirstIndex
+	return uint64(offset) + l.firstIndex
 }

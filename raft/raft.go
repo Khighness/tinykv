@@ -16,7 +16,9 @@ package raft
 
 import (
 	"errors"
+	"github.com/pingcap-incubator/tinykv/log"
 	"math/rand"
+	"sort"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -170,7 +172,7 @@ type Raft struct {
 // newRaft return a raft peer with the given config
 func newRaft(c *Config) *Raft {
 	if err := c.validate(); err != nil {
-		panic(err.Error())
+		log.Panic(err)
 	}
 	// Your Code Here (2A).
 	raft := &Raft{
@@ -218,11 +220,11 @@ func (r *Raft) sendAppend(to uint64) bool {
 			return false
 		}
 		// This should not happen.
-		panic(err)
+		log.Panic(err)
 	}
 	var entries []*pb.Entry
 	n := len(r.RaftLog.entries)
-	for i := r.RaftLog.toSLiceIndex(prevLogIndex + 1); i < n; i++ {
+	for i := r.RaftLog.toSliceIndex(prevLogIndex + 1); i < n; i++ {
 		entries = append(entries, &r.RaftLog.entries[i])
 	}
 	msg := pb.Message{
@@ -613,14 +615,150 @@ func (r *Raft) doElection() {
 	}
 }
 
+// resetElectionTimeout reset `electionElapsed` to zero and
+// `randomElectionTimeout` to a new random value.
+func (r *Raft) resetElectionTimeout() {
+	r.electionElapsed = 0
+	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
+}
+
 // handleAppendEntries handles AppendEntries RPC request.
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
 
+	// 5.1 Reply false if term < currentTerm.
+	if m.Term != None && m.Term < r.Term {
+		r.sendAppendResponse(m.From, true, None, None)
+		return
+	}
+
+	// For all roles.
+	r.resetElectionTimeout()
+	r.Lead = m.From
+
+	// 5.2 Reply false if log doesn't contain an entry at prevLogIndex
+	// whose term matches prevLogTerm.
+	l := r.RaftLog
+	lastIndex := l.LastIndex()
+	if m.Index > lastIndex { // need older log entries
+		r.sendAppendResponse(m.From, true, None, lastIndex+1)
+		return
+	}
+
+	// RAFT optimization: Check the difference of prev log entry with leader's.
+	if m.Index >= l.FirstIndex() {
+		logTerm, err := l.Term(m.Index)
+		if err != nil {
+			log.Panic(err)
+		}
+		// The term of prev log entry is different.
+		if logTerm != m.LogTerm {
+			// Find the first index of log entry whose term is conflict with leader
+			// in range of entries [0, m.Index].
+			idx := sort.Search(l.toSliceIndex(m.Index+1), func(i int) bool {
+				return l.entries[i].Term == logTerm
+			})
+			conflictIndex := l.toEntryIndex(idx)
+			r.sendAppendResponse(m.From, true, logTerm, conflictIndex)
+			return
+		}
+	}
+
+	// Append leader's new log entries.
+	for i, entry := range m.Entries {
+		if entry.Index < l.FirstIndex() {
+			continue
+		}
+		if entry.Index <= l.LastIndex() {
+			logTerm, err := l.Term(entry.Index)
+			if err != nil {
+				log.Panic(err)
+			}
+			// 5.3 If an existing entry conflicts with a new one
+			// (same index but different terms),
+			// delete the existing entry and all that follow it.
+			if logTerm != entry.Term {
+				idx := l.toSliceIndex(entry.Index)
+				l.entries[idx] = *entry
+				l.entries = l.entries[:idx+1]
+				l.stableTo(min(l.stabled, entry.Index-1))
+			}
+		} else {
+			// 5.4 Append any new entries not already in the log.
+			n := len(m.Entries)
+			for j := i; j < n; j++ {
+				l.entries = append(l.entries, *m.Entries[j])
+			}
+			break
+		}
+	}
+	// 5.5 If leaderCommit > commitIndex,
+	// set commitIndex = min(leaderCommit, index of last new entry).
+	if m.Commit > l.committed {
+		l.commitTo(min(m.Commit, m.Index+uint64(len(m.Entries))))
+	}
+	r.sendAppendResponse(m.From, false, None, l.LastIndex())
 }
 
 // handleAppendEntriesResponse handles AppendEntries RPC response.
 func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
+	if m.Term != None && m.Term < r.Term {
+		return
+	}
+	// Handle the conflict term in the prev log entry.
+	if m.Reject {
+		conflictIndex := m.Index
+		if conflictIndex == None {
+			return
+		}
+		if m.LogTerm != None {
+			logTerm := m.LogTerm
+			l := r.RaftLog
+			idx := sort.Search(len(l.entries), func(i int) bool {
+				return l.entries[i].Term > logTerm
+			})
+			if idx > 0 && l.entries[idx-1].Term == logTerm {
+				conflictIndex = l.toEntryIndex(idx)
+			}
+		}
+		r.Prs[m.From].Next = conflictIndex
+		// Send AppendEntriesRPC RPC immediately.
+		r.sendAppend(m.From)
+		return
+	}
+
+	if m.Index > r.Prs[m.From].Match {
+		r.Prs[m.From].Match = m.Index
+		r.Prs[m.From].Next = m.Index + 1
+		r.leaderCommit()
+		if m.From == r.leadTransferee && m.Index == r.RaftLog.LastIndex() {
+			r.sendTimeout(m.From)
+			r.leadTransferee = None
+		}
+	}
+}
+
+// leaderCommit advances commit index if necessary and broadcasts
+// AppendEntries RPC to notify followers to advance commit index.
+func (r *Raft) leaderCommit() {
+	match := make(uint64Slice, len(r.Prs))
+	i := 0
+	for _, prs := range r.Prs {
+		match[i] = prs.Match
+		i++
+	}
+	sort.Sort(match)
+	committedQuorum := match[(len(r.Prs)-1)/2]
+	if committedQuorum > r.RaftLog.committed {
+		logTerm, err := r.RaftLog.Term(committedQuorum)
+		if err != nil {
+			log.Panic(err)
+		}
+		if logTerm == r.Term {
+			r.RaftLog.commitTo(committedQuorum)
+			r.broadcastAppendEntries()
+		}
+	}
 }
 
 // handleRequestVote handles RequestVote RPC request.
@@ -640,8 +778,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		return
 	}
 	r.Vote = m.From
-	r.electionElapsed = 0
-	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
+	r.resetElectionTimeout()
 	r.sendRequestVoteResponse(m.From, false)
 }
 
@@ -668,6 +805,12 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 // handleHeartbeat handles HeartBeat RPC request.
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
+	if m.Term != None && m.Term < r.Term {
+		r.sendHeartBeatResponse(m.From, true)
+	}
+	r.Lead = m.From
+	r.resetElectionTimeout()
+	r.sendHeartBeatResponse(m.From, false)
 }
 
 // handleSnapshot handles InstallSnapshot RPC request.
@@ -677,7 +820,22 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 
 // handleTransferLeader handles TransferLeader request.
 func (r *Raft) handleTransferLeader(m pb.Message) {
-
+	if m.From == r.id {
+		return
+	}
+	if r.leadTransferee != None && r.leadTransferee == m.From {
+		return
+	}
+	if _, ok := r.Prs[m.From]; !ok {
+		return
+	}
+	r.leadTransferee = m.From
+	r.transferElapsed = 0
+	if r.Prs[m.From].Match == r.RaftLog.LastIndex() {
+		r.sendTimeout(m.From)
+	} else {
+		r.sendAppend(m.From)
+	}
 }
 
 // addNode adds a new node to raft group.

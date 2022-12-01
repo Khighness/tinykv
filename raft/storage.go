@@ -187,6 +187,7 @@ func (ms *MemoryStorage) ApplySnapshot(snap pb.Snapshot) error {
 	return nil
 }
 
+//
 // CreateSnapshot makes a snapshot which can be retrieved with Snapshot() and
 // can be used to reconstruct the state at that point.
 // If any configuration changes have been made since the last compaction,
@@ -215,6 +216,25 @@ func (ms *MemoryStorage) CreateSnapshot(i uint64, cs *pb.ConfState, data []byte)
 // Compact discards all log entries prior to compactIndex.
 // It is the application's responsibility to not attempt to compact an index
 // greater than raftLog.applied.
+//
+//	For example:
+//	log entries is the following table
+//	+--------------+-------+-------+-------+-------+-------+
+//	| slice index  |   0   |   1   |   2   |   3   |   4   |
+//	+--------------+-------+-------+-------+-------+-------+
+//	|  log index   |   0   |   1   |   2   |   3   |   4   |
+//	+--------------+-------+-------+-------+-------+-------+
+//	| entry remark | dummy | first |    .......    |  last |
+//	+--------------+-------+-------+-------+-------+-------+
+//
+//	If compactIndex = 2, new log entries will be like
+//	+--------------+-------+-------+-------+
+//	| slice index  |   0   |   1   |   2   |
+//	+--------------+-------+-------+-------+
+//	|  log index   |   2   |   3   |   4   |
+//	+--------------+-------+-------+-------+
+//	| entry remark | dummy | first |  last |
+//	+--------------+-------+-------+-------+
 func (ms *MemoryStorage) Compact(compactIndex uint64) error {
 	ms.Lock()
 	defer ms.Unlock()
