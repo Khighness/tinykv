@@ -75,6 +75,14 @@ func newLog(storage Storage) *RaftLog {
 	return raftLog
 }
 
+// firstTo advances first index.0
+func (l *RaftLog) firstTo(firstIndex uint64) {
+	if firstIndex < l.firstIndex {
+		log.Panicf("RaftLog|firstTo: newFirstIndex(%d) < firstIndex(%d)", firstIndex, l.firstIndex)
+	}
+	l.firstIndex = firstIndex
+}
+
 // stableTo advances stable index.
 func (l *RaftLog) stableTo(stableIndex uint64) {
 	if stableIndex > l.stabled {

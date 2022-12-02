@@ -207,6 +207,23 @@ func newRaft(c *Config) *Raft {
 	return raft
 }
 
+// softState returns soft state.
+func (r *Raft) softState() *SoftState {
+	return &SoftState{
+		Lead:      r.Term,
+		RaftState: r.State,
+	}
+}
+
+// hardState returns hard state.
+func (r *Raft) hardState() pb.HardState {
+	return pb.HardState{
+		Term:   r.Term,
+		Vote:   r.Vote,
+		Commit: r.RaftLog.committed,
+	}
+}
+
 // sendAppend sends an AppendEntries RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
@@ -816,6 +833,26 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // handleSnapshot handles InstallSnapshot RPC request.
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	meta := m.Snapshot.Metadata
+	if meta.Index <= r.RaftLog.committed {
+		r.sendAppendResponse(m.From, false, None, r.RaftLog.committed)
+		return
+	}
+	r.becomeFollower(max(r.Term, m.Term), m.From)
+	first := meta.Index + 1
+	if len(r.RaftLog.entries) > 0 {
+		r.RaftLog.entries = nil
+	}
+	r.RaftLog.firstTo(first)
+	r.RaftLog.applyTo(meta.Index)
+	r.RaftLog.commitTo(meta.Index)
+	r.RaftLog.stableTo(meta.Index)
+	r.Prs = make(map[uint64]*Progress)
+	for _, peer := range meta.ConfState.Nodes {
+		r.Prs[peer] = &Progress{}
+	}
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	r.sendAppendResponse(m.From, false, None, r.RaftLog.LastIndex())
 }
 
 // handleTransferLeader handles TransferLeader request.
@@ -841,9 +878,20 @@ func (r *Raft) handleTransferLeader(m pb.Message) {
 // addNode adds a new node to raft group.
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; !ok {
+		r.Prs[id] = &Progress{Next: 1}
+	}
+	r.PendingConfIndex = None
 }
 
 // removeNode removes a node from raft group.
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; ok {
+		delete(r.Prs, id)
+		if r.State == StateLeader {
+			r.leaderCommit()
+		}
+	}
+	r.PendingConfIndex = None
 }
