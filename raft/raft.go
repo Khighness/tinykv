@@ -16,10 +16,13 @@ package raft
 
 import (
 	"errors"
-	"github.com/pingcap-incubator/tinykv/log"
+	"fmt"
 	"math/rand"
 	"sort"
 
+	"go.uber.org/zap"
+
+	_ "github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -172,7 +175,7 @@ type Raft struct {
 // newRaft return a raft peer with the given config
 func newRaft(c *Config) *Raft {
 	if err := c.validate(); err != nil {
-		log.Panic(err)
+		zap.L().Panic("Validate config", zap.Error(err))
 	}
 	// Your Code Here (2A).
 	raft := &Raft{
@@ -207,6 +210,20 @@ func newRaft(c *Config) *Raft {
 	return raft
 }
 
+// String return raft's term, id and state.
+func (r *Raft) String() string {
+	var state string
+	switch r.State {
+	case StateLeader:
+		state = "L"
+	case StateCandidate:
+		state = "C"
+	case StateFollower:
+		state = "F"
+	}
+	return fmt.Sprintf("[TE:%d] [ID:%s-%d]", r.Term, state, r.id)
+}
+
 // softState returns soft state.
 func (r *Raft) softState() *SoftState {
 	return &SoftState{
@@ -237,7 +254,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 			return false
 		}
 		// This should not happen.
-		log.Panic(err)
+		zap.L().Panic("Get log term", zap.Error(err))
 	}
 	var entries []*pb.Entry
 	n := len(r.RaftLog.entries)
@@ -255,22 +272,28 @@ func (r *Raft) sendAppend(to uint64) bool {
 		Commit:  r.RaftLog.committed,
 	}
 	r.msgs = append(r.msgs, msg)
+	zap.S().Debugf("%s send AEA: {to=%d, term=%d, index=%d, logTerm=%d, commit=%d, len=%d}",
+		r, msg.To, msg.Term, msg.LogTerm, msg.Index, msg.Commit, len(entries))
 	return true
 }
 
 // sendAppendResponse sends a response for AppendEntries
 // RPC to the given peer.
+// The param term is not None, which means the prev log
+// entry is in conflict.
 func (r *Raft) sendAppendResponse(to uint64, reject bool, term, index uint64) {
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
-		Reject:  reject,
 		Index:   index,
 		LogTerm: term,
+		Reject:  reject,
 	}
 	r.msgs = append(r.msgs, msg)
+	zap.S().Debugf("%s send AER: {to=%d, term=%d, index=%d, logTerm=%d, accept=%v}",
+		r, msg.To, msg.Term, msg.LogTerm, msg.Index, !msg.Reject)
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -283,6 +306,7 @@ func (r *Raft) sendHeartbeat(to uint64) {
 		Term:    r.Term,
 	}
 	r.msgs = append(r.msgs, msg)
+	zap.S().Debugf("%s send HBA: {to=%d}", r, msg.To)
 }
 
 // sendHeartBeatResponse sends a response for HeartBeat RPC to
@@ -296,6 +320,7 @@ func (r *Raft) sendHeartBeatResponse(to uint64, reject bool) {
 		Reject:  reject,
 	}
 	r.msgs = append(r.msgs, msg)
+	zap.S().Debugf("%s send HBR: {to=%d, accept=%v}", r, msg.To, !reject)
 }
 
 // sendRequestVote sends a RequestVote RPC with index and term of
@@ -306,10 +331,12 @@ func (r *Raft) sendRequestVote(to, index, term uint64) {
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
-		Index:   index,
 		LogTerm: term,
+		Index:   index,
 	}
 	r.msgs = append(r.msgs, msg)
+	zap.S().Debugf("%s send RVA: {to=%d, term=%d, logTerm=%d, index=%d}",
+		r, msg.To, msg.Term, msg.LogTerm, msg.Index)
 }
 
 // sendRequestVoteResponse send a response for RequestVote RPC to
@@ -323,6 +350,7 @@ func (r *Raft) sendRequestVoteResponse(to uint64, reject bool) {
 		Reject:  reject,
 	}
 	r.msgs = append(r.msgs, msg)
+	zap.S().Debugf("%s send RVR: {to=%d, term=%d, vote=%v}", r, msg.To, msg.Term, !reject)
 }
 
 // sendSnapshot sends a snapshot RPC to the given peer.
@@ -340,6 +368,8 @@ func (r *Raft) sendSnapshot(to uint64) {
 	}
 	r.msgs = append(r.msgs, msg)
 	r.Prs[to].Next = snapshot.Metadata.Index + 1
+	zap.S().Debugf("%s send ISA: {to=%d, term=%d, meta(term=%d, index=%d)}",
+		r, to, snapshot.Metadata.Term, snapshot.Metadata.Index)
 }
 
 // sendTimeout sends a timeout RPC to the given peer.
@@ -350,6 +380,7 @@ func (r *Raft) sendTimeout(to uint64) {
 		To:      to,
 	}
 	r.msgs = append(r.msgs, msg)
+	zap.S().Debugf("%s send TMO: {to=%d}", r, to)
 }
 
 // tick advances the internal logical clock by a single tick.
@@ -371,6 +402,7 @@ func (r *Raft) tick() {
 func (r *Raft) tickElection() {
 	r.electionElapsed++
 	if r.electionElapsed >= r.randomElectionTimeout {
+		zap.S().Infof("%s election timeout, start pre-vote", r)
 		r.electionElapsed = 0
 		r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
 	}
@@ -381,6 +413,7 @@ func (r *Raft) tickElection() {
 func (r *Raft) tickHeartBeat() {
 	r.heartbeatElapsed++
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
+		zap.S().Infof("%s heartbeat timeout, broadcast beat")
 		r.heartbeatElapsed = 0
 		r.Step(pb.Message{MsgType: pb.MessageType_MsgBeat})
 	}
@@ -390,6 +423,8 @@ func (r *Raft) tickHeartBeat() {
 // whether to transfer the leadership.
 func (r *Raft) tickTransfer() {
 	r.transferElapsed++
+	// The leadership transfer has not been completed after two rounds of elections.
+	// The target node may hang up and be turn leadTransferee into none.
 	if r.transferElapsed >= 2*r.electionTimeout {
 		r.transferElapsed = 0
 		r.leadTransferee = None
@@ -399,6 +434,7 @@ func (r *Raft) tickTransfer() {
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
+	zap.S().Infof("%s state: %v -> %v, curr leader: %v", r, r.State, StateFollower, lead)
 	r.State = StateFollower
 	r.Lead = lead
 	r.Term = term
@@ -407,6 +443,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
+	zap.S().Infof("%s state: %v -> %v, prev leader: %v", r, r.State, StateCandidate, r.Lead)
 	// Your Code Here (2A).
 	r.State = StateCandidate
 	r.Lead = None
@@ -421,6 +458,7 @@ func (r *Raft) becomeCandidate() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	zap.S().Infof("%s state: %s -> %s, prev leader: %d", r, r.State, StateLeader, r.Lead)
 	r.State = StateLeader
 	r.Lead = r.id
 	r.heartbeatElapsed = 0
@@ -476,6 +514,7 @@ func (r *Raft) stepFollower(m pb.Message) error {
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
 	case pb.MessageType_MsgRequestVote:
+		r.handleRequestVote(m)
 	case pb.MessageType_MsgRequestVoteResponse:
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
@@ -502,6 +541,7 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 	case pb.MessageType_MsgPropose:
 	case pb.MessageType_MsgAppend:
 		if m.Term == r.Term {
+			zap.S().Debugf("%s receive AEA from leader: %d, become follower", r, m.From)
 			r.becomeFollower(m.Term, m.From)
 		}
 		r.handleAppendEntries(m)
@@ -514,12 +554,14 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 		r.handleSnapshot(m)
 	case pb.MessageType_MsgHeartbeat:
 		if m.Term == r.Term {
+			zap.S().Debugf("%s receive HBA from leader: %d, become follower", r, m.From)
 			r.becomeFollower(m.Term, m.Term)
 		}
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 	case pb.MessageType_MsgTransferLeader:
 		if r.Lead != None {
+			zap.S().Debugf("%s receive TSL: {from=%d, to=%d}, change to lead: %d", r, m.From, m.To, r.Lead)
 			m.To = r.Lead
 			r.msgs = append(r.msgs, m)
 		}
@@ -539,9 +581,9 @@ func (r *Raft) stepLeader(m pb.Message) error {
 	// local msg used to call leader append data to log entries
 	case pb.MessageType_MsgPropose:
 		if r.leadTransferee == None {
+			zap.S().Infof("%s process propose: %s", r, m.Entries)
 			r.appendEntries(m.Entries)
 		}
-	// the scene of network turns into normal after cluster cerebral fissure
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	// response msg from other nodes for AppendEntries RPC
@@ -557,7 +599,6 @@ func (r *Raft) stepLeader(m pb.Message) error {
 	// heartbeat msg from another leader
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
-	// response msg to another leader and try to let it become follower
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.sendAppend(m.From)
 	// request msg to let it transfer leadership
@@ -572,6 +613,7 @@ func (r *Raft) stepLeader(m pb.Message) error {
 // broadcastHeartBeat is used by leader to broadcast HeartBeat
 // RPC to all nodes.
 func (r *Raft) broadcastHeartBeat() {
+	zap.S().Debugf("%s start to broadcast heartbeat", r)
 	for peer := range r.Prs {
 		if peer == r.id {
 			continue
@@ -583,6 +625,7 @@ func (r *Raft) broadcastHeartBeat() {
 // broadcastAppendEntries is used by leader to broadcast AppendEntries
 // RPC to all nodes.
 func (r *Raft) broadcastAppendEntries() {
+	zap.S().Debugf("%s start to broadcast entries", r)
 	for peer := range r.Prs {
 		if peer == r.id {
 			continue
@@ -619,6 +662,7 @@ func (r *Raft) doElection() {
 	r.heartbeatElapsed = 0
 	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
 	if len(r.Prs) == 1 {
+		zap.S().Infof("%s standalone mode, become leader at %d directly", r, r.Term)
 		r.becomeLeader()
 		return
 	}
@@ -642,6 +686,8 @@ func (r *Raft) resetElectionTimeout() {
 // handleAppendEntries handles AppendEntries RPC request.
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	zap.S().Debugf("%s receive AEA: {from=%d, term=%d, logTerm=%d, index=%d, len=%d, entries=%s}",
+		r, m.From, m.Term, m.LogTerm, m.Index, len(m.Entries), m.Entries)
 
 	// 5.1 Reply false if term < currentTerm.
 	if m.Term != None && m.Term < r.Term {
@@ -666,7 +712,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if m.Index >= l.FirstIndex() {
 		logTerm, err := l.Term(m.Index)
 		if err != nil {
-			log.Panic(err)
+			zap.L().Panic("Get log term", zap.Error(err))
 		}
 		// The term of prev log entry is different.
 		if logTerm != m.LogTerm {
@@ -689,11 +735,12 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		if entry.Index <= l.LastIndex() {
 			logTerm, err := l.Term(entry.Index)
 			if err != nil {
-				log.Panic(err)
+				zap.L().Panic("Get log term", zap.Error(err))
 			}
 			// 5.3 If an existing entry conflicts with a new one
 			// (same index but different terms),
-			// delete the existing entry and all that follow it.
+			// update the existing entry and delete all entries
+			// that follow it.
 			if logTerm != entry.Term {
 				idx := l.toSliceIndex(entry.Index)
 				l.entries[idx] = *entry
@@ -710,7 +757,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		}
 	}
 	// 5.5 If leaderCommit > commitIndex,
-	// set commitIndex = min(leaderCommit, index of last new entry).
+	// set commitIndex = min(leaderCommit, lastIndex).
 	if m.Commit > l.committed {
 		l.commitTo(min(m.Commit, m.Index+uint64(len(m.Entries))))
 	}
@@ -769,7 +816,7 @@ func (r *Raft) leaderCommit() {
 	if committedQuorum > r.RaftLog.committed {
 		logTerm, err := r.RaftLog.Term(committedQuorum)
 		if err != nil {
-			log.Panic(err)
+			zap.L().Panic("Get log term", zap.Error(err))
 		}
 		if logTerm == r.Term {
 			r.RaftLog.commitTo(committedQuorum)
@@ -780,6 +827,8 @@ func (r *Raft) leaderCommit() {
 
 // handleRequestVote handles RequestVote RPC request.
 func (r *Raft) handleRequestVote(m pb.Message) {
+	zap.S().Debugf("%s receive RVA: {from=%d, term=%d, logTerm=%d, index=%d}",
+		r, m.From, m.Term, m.LogTerm, m.Index)
 	if m.Term != None && m.Term < r.Term {
 		r.sendRequestVoteResponse(m.From, true)
 		return
@@ -801,9 +850,11 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 
 // handleRequestVoteResponse handles RequestVote RPC response.
 func (r *Raft) handleRequestVoteResponse(m pb.Message) {
+	zap.S().Debugf("%s receive RVR: {from=%v, term=%d, vote=%v}", r, m.From, m.Term, !m.Reject)
 	if m.Term != None && m.Term < r.Term {
 		return
 	}
+	r.votes[m.From] = !m.Reject
 	grant := 0
 	votes := len(r.votes)
 	quorum := len(r.Prs) / 2
@@ -813,6 +864,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 		}
 	}
 	if grant > quorum {
+		zap.S().Debugf("%s receive quorum vote: %d, become leader at term: %d", r, grant, r.Term)
 		r.becomeLeader()
 	} else if votes-grant > quorum {
 		r.becomeFollower(r.Term, None)
@@ -822,6 +874,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 // handleHeartbeat handles HeartBeat RPC request.
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
+	zap.S().Debugf("%s receive HBA: {from=%v, term=%d}", r, m.From, m.Term)
 	if m.Term != None && m.Term < r.Term {
 		r.sendHeartBeatResponse(m.From, true)
 	}
@@ -834,6 +887,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
 	meta := m.Snapshot.Metadata
+	zap.S().Debugf("%s receive ISA: {from: %d, meta(term=%d, index=%d)}", r, m.From, meta.Term, meta.Index)
 	if meta.Index <= r.RaftLog.committed {
 		r.sendAppendResponse(m.From, false, None, r.RaftLog.committed)
 		return
@@ -857,6 +911,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 
 // handleTransferLeader handles TransferLeader request.
 func (r *Raft) handleTransferLeader(m pb.Message) {
+	zap.S().Debugf("%s receive TSL: {from=%d}, curr transferee: %d", r, m.From, r.transferElapsed)
 	if m.From == r.id {
 		return
 	}

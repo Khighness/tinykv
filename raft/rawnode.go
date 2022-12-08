@@ -182,14 +182,17 @@ func (rn *RawNode) Ready() Ready {
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
 	r := rn.Raft
+	// Whether the hard state has been updated.
 	if hardSt := r.hardState(); !IsEmptyHardState(hardSt) && !isHardStateEqual(hardSt, rn.prevHardSt) {
 		return true
 	}
+	// Whether there are entries to be persisted.
 	if len(r.RaftLog.unstableEntries()) > 0 ||
 		len(r.RaftLog.nextEnts()) > 0 ||
 		len(r.msgs) > 0 {
 		return true
 	}
+	// Whether there is a snapshot to be applied.
 	if !IsEmptySnap(r.RaftLog.pendingSnapshot) {
 		return true
 	}
@@ -200,6 +203,17 @@ func (rn *RawNode) HasReady() bool {
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	if !IsEmptyHardState(rd.HardState) {
+		rn.prevHardSt = rd.HardState
+	}
+	l := rn.Raft.RaftLog
+	if len(rd.Entries) > 0 {
+		l.stableTo(rd.Entries[len(rd.Entries)-1].Index)
+	}
+	if len(rd.CommittedEntries) > 0 {
+		l.commitTo(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
+	}
+	l.maybeCompact()
 }
 
 // GetProgress return the Progress of this node and its peers, if this

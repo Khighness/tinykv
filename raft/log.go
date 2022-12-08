@@ -15,7 +15,7 @@
 package raft
 
 import (
-	"github.com/pingcap-incubator/tinykv/log"
+	"go.uber.org/zap"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -77,32 +77,28 @@ func newLog(storage Storage) *RaftLog {
 
 // firstTo advances first index.0
 func (l *RaftLog) firstTo(firstIndex uint64) {
-	if firstIndex < l.firstIndex {
-		log.Panicf("RaftLog|firstTo: newFirstIndex(%d) < firstIndex(%d)", firstIndex, l.firstIndex)
-	}
+	// if firstIndex < l.firstIndex {
+	// 	 zap.S().Panicf("firstTo: newFirstIndex(%d) < firstIndex(%d)", firstIndex, l.firstIndex)
+	// }
 	l.firstIndex = firstIndex
 }
 
 // stableTo advances stable index.
 func (l *RaftLog) stableTo(stableIndex uint64) {
-	if stableIndex > l.stabled {
-		lastIndex := l.LastIndex()
-		if stableIndex > lastIndex {
-			log.Panicf("RaftLog|stableTo: stableIndex(%d) > lastIndex(%d)", stableIndex, lastIndex)
-		}
-		l.stabled = stableIndex
+	lastIndex := l.LastIndex()
+	if stableIndex > lastIndex {
+		zap.S().Panicf("stableTo: stableIndex(%d) > lastIndex(%d)", stableIndex, lastIndex)
 	}
+	l.stabled = stableIndex
 }
 
 // commitTo advances committed index.
 func (l *RaftLog) commitTo(commitIndex uint64) {
-	if commitIndex > l.committed {
-		lastIndex := l.LastIndex()
-		if commitIndex > lastIndex {
-			log.Panicf("RaftLog|commitTo: commitIndex(%d) > lastIndex(%d)", commitIndex, lastIndex)
-		}
-		l.committed = commitIndex
+	lastIndex := l.LastIndex()
+	if commitIndex > lastIndex {
+		zap.S().Panicf("commitTo: commitIndex(%d) > lastIndex(%d)", commitIndex, lastIndex)
 	}
+	l.committed = commitIndex
 }
 
 // applyTo advances applied index.
@@ -111,7 +107,7 @@ func (l *RaftLog) applyTo(applyIndex uint64) {
 		return
 	}
 	if applyIndex < l.applied || applyIndex > l.committed {
-		log.Panicf("RaftLog|applyTo: applyIndex(%d) is out of range [applied(%d), committed(%d)]",
+		zap.S().Panicf("applyTo: applyIndex(%d) is out of range [applied(%d), committed(%d)]",
 			applyIndex, l.applied, l.committed)
 	}
 	l.applied = applyIndex
@@ -141,7 +137,7 @@ func (l *RaftLog) maybeCompact() {
 // note, this is one of the test stub functions you need to implement.
 func (l *RaftLog) allEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return l.entries[1:]
+	return l.entries
 }
 
 // unstableEntries return all the unstable entries.
@@ -209,7 +205,7 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 func (l *RaftLog) toSliceIndex(logIndex uint64) int {
 	idx := int(logIndex - l.firstIndex)
 	if idx < 0 {
-		log.Panicf("RaftLog|toSliceIndex: logIndex(%d) < firstIndex(%d)", logIndex, l.firstIndex)
+		zap.S().Panicf("toSliceIndex: logIndex(%d) < firstIndex(%d)", logIndex, l.firstIndex)
 	}
 	return idx
 }

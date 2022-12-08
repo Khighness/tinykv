@@ -188,6 +188,7 @@ func TestLeaderElectionInOneRoundRPC2AA(t *testing.T) {
 		{5, map[uint64]bool{}, StateCandidate},
 	}
 	for i, tt := range tests {
+		t.Logf("test =====> %d", i)
 		r := newTestRaft(1, idsBySize(tt.size), 10, 1, NewMemoryStorage())
 
 		r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
@@ -221,6 +222,7 @@ func TestFollowerVote2AA(t *testing.T) {
 		{2, 1, true},
 	}
 	for i, tt := range tests {
+		t.Logf("test =====> %d", i)
 		r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 		r.Term = 1
 		r.Vote = tt.vote
@@ -248,6 +250,7 @@ func TestCandidateFallback2AA(t *testing.T) {
 		{From: 2, To: 1, Term: 2, MsgType: pb.MessageType_MsgAppend},
 	}
 	for i, tt := range tests {
+		t.Logf("test =====> %d", i)
 		r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 		r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 		if r.State != StateCandidate {
@@ -564,7 +567,7 @@ func TestFollowerCommitEntry2AB(t *testing.T) {
 }
 
 // TestFollowerCheckMessageType_MsgAppend tests that if the follower does not find an
-// entry in its log with the same index and term as the one in AppendEntries RPC,
+// entry in its log with the same index and term as the``````` one in AppendEntries RPC,
 // then it refuses the new entries. Otherwise it replies that it accepts the
 // append entries.
 // Reference: section 5.3
@@ -648,6 +651,7 @@ func TestFollowerAppendEntries2AB(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
+		t.Logf("test =====> %d", i)
 		storage := NewMemoryStorage()
 		storage.Append([]pb.Entry{{Term: 1, Index: 1}, {Term: 2, Index: 2}})
 		r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, storage)
