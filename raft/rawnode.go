@@ -211,7 +211,7 @@ func (rn *RawNode) Advance(rd Ready) {
 		l.stableTo(rd.Entries[len(rd.Entries)-1].Index)
 	}
 	if len(rd.CommittedEntries) > 0 {
-		l.commitTo(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
+		l.applyTo(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
 	}
 	l.maybeCompact()
 }

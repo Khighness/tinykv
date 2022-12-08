@@ -491,6 +491,9 @@ func (r *Raft) Step(m pb.Message) error {
 		r.leadTransferee = None
 		r.becomeFollower(m.Term, None)
 	}
+	if m.MsgType == pb.MessageType_MsgTransferLeader {
+		zap.S().Debugf("%s receive TSL: {from=%d}", r, m.From)
+	}
 	var err error
 	switch r.State {
 	case StateFollower:
