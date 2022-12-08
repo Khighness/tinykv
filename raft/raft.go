@@ -313,7 +313,7 @@ func (r *Raft) sendHeartbeat(to uint64) {
 // the given peer.
 func (r *Raft) sendHeartBeatResponse(to uint64, reject bool) {
 	msg := pb.Message{
-		MsgType: pb.MessageType_MsgHeartbeat,
+		MsgType: pb.MessageType_MsgHeartbeatResponse,
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
@@ -820,6 +820,7 @@ func (r *Raft) leaderCommit() {
 		}
 		if logTerm == r.Term {
 			r.RaftLog.commitTo(committedQuorum)
+			zap.S().Infof("%s advance commit index to: %d", r, committedQuorum)
 			r.broadcastAppendEntries()
 		}
 	}
@@ -897,21 +898,22 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	if len(r.RaftLog.entries) > 0 {
 		r.RaftLog.entries = nil
 	}
+	// The update order is important.
+	r.RaftLog.pendingSnapshot = m.Snapshot
 	r.RaftLog.firstTo(first)
-	r.RaftLog.applyTo(meta.Index)
-	r.RaftLog.commitTo(meta.Index)
 	r.RaftLog.stableTo(meta.Index)
+	r.RaftLog.commitTo(meta.Index)
+	r.RaftLog.applyTo(meta.Index)
 	r.Prs = make(map[uint64]*Progress)
 	for _, peer := range meta.ConfState.Nodes {
 		r.Prs[peer] = &Progress{}
 	}
-	r.RaftLog.pendingSnapshot = m.Snapshot
 	r.sendAppendResponse(m.From, false, None, r.RaftLog.LastIndex())
 }
 
 // handleTransferLeader handles TransferLeader request.
 func (r *Raft) handleTransferLeader(m pb.Message) {
-	zap.S().Debugf("%s receive TSL: {from=%d}, curr transferee: %d", r, m.From, r.transferElapsed)
+	zap.S().Debugf("%s receive TSL: {from=%d}", r, m.From)
 	if m.From == r.id {
 		return
 	}
@@ -921,6 +923,7 @@ func (r *Raft) handleTransferLeader(m pb.Message) {
 	if _, ok := r.Prs[m.From]; !ok {
 		return
 	}
+	zap.S().Infof("%s update transferee: %d -> %d", r.transferElapsed, m.From)
 	r.leadTransferee = m.From
 	r.transferElapsed = 0
 	if r.Prs[m.From].Match == r.RaftLog.LastIndex() {
@@ -935,6 +938,7 @@ func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
 	if _, ok := r.Prs[id]; !ok {
 		r.Prs[id] = &Progress{Next: 1}
+		zap.S().Infof("%s add node: %d", r, id)
 	}
 	r.PendingConfIndex = None
 }
@@ -944,6 +948,7 @@ func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
 	if _, ok := r.Prs[id]; ok {
 		delete(r.Prs, id)
+		zap.S().Info("%s remove node: %d", r, id)
 		if r.State == StateLeader {
 			r.leaderCommit()
 		}

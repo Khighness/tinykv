@@ -77,9 +77,9 @@ func newLog(storage Storage) *RaftLog {
 
 // firstTo advances first index.0
 func (l *RaftLog) firstTo(firstIndex uint64) {
-	// if firstIndex < l.firstIndex {
-	// 	 zap.S().Panicf("firstTo: newFirstIndex(%d) < firstIndex(%d)", firstIndex, l.firstIndex)
-	// }
+	if firstIndex < l.firstIndex {
+		zap.S().Panicf("firstTo: newFirstIndex(%d) < firstIndex(%d)", firstIndex, l.firstIndex)
+	}
 	l.firstIndex = firstIndex
 }
 
@@ -95,8 +95,9 @@ func (l *RaftLog) stableTo(stableIndex uint64) {
 // commitTo advances committed index.
 func (l *RaftLog) commitTo(commitIndex uint64) {
 	lastIndex := l.LastIndex()
-	if commitIndex > lastIndex {
-		zap.S().Panicf("commitTo: commitIndex(%d) > lastIndex(%d)", commitIndex, lastIndex)
+	if commitIndex < l.committed || commitIndex > lastIndex {
+		zap.S().Panicf("commitTo: commitIndex(%d) is out of range [committed(%d), lastIndex(%d)]",
+			commitIndex, l.committed, lastIndex)
 	}
 	l.committed = commitIndex
 }
