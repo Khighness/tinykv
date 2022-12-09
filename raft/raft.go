@@ -372,7 +372,9 @@ func (r *Raft) sendSnapshot(to uint64) {
 		r, to, snapshot.Metadata.Term, snapshot.Metadata.Index)
 }
 
-// sendTimeout sends a timeout RPC to the given peer.
+// sendTimeout sends from the leader to the leadership transfer target
+// to let the leadership transfer target timeout immediately and start
+// a new election.
 func (r *Raft) sendTimeout(to uint64) {
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgTimeoutNow,
@@ -380,7 +382,7 @@ func (r *Raft) sendTimeout(to uint64) {
 		To:      to,
 	}
 	r.msgs = append(r.msgs, msg)
-	zap.S().Debugf("%s send TMO: {to=%d}", r, to)
+	zap.S().Debugf("%s send TMO: {to=%d}, transfer leadership to: %d", r, to, to)
 }
 
 // tick advances the internal logical clock by a single tick.
@@ -393,7 +395,7 @@ func (r *Raft) tick() {
 		if r.leadTransferee != None {
 			r.tickTransfer()
 		}
-		r.tickHeartBeat()
+		r.tickHeartbeat()
 	}
 }
 
@@ -402,15 +404,15 @@ func (r *Raft) tick() {
 func (r *Raft) tickElection() {
 	r.electionElapsed++
 	if r.electionElapsed >= r.randomElectionTimeout {
-		zap.S().Infof("%s election timeout, start pre-vote", r)
+		zap.S().Infof("%s election timeout, start a new election", r)
 		r.electionElapsed = 0
 		r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
 	}
 }
 
-// tickHeartBeat advances `r.heartbeatElapsed` and determines
+// tickHeartbeat advances `r.heartbeatElapsed` and determines
 // whether to broadcast a round of heartbeat.
-func (r *Raft) tickHeartBeat() {
+func (r *Raft) tickHeartbeat() {
 	r.heartbeatElapsed++
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
 		zap.S().Infof("%s heartbeat timeout, broadcast beat")
@@ -431,7 +433,17 @@ func (r *Raft) tickTransfer() {
 	}
 }
 
-// becomeFollower transform this peer's state to Follower
+// redirectTransfer used to reset the transfer target to their current leader
+// When follower or candidate receives leader transfer.
+func (r *Raft) redirectTransfer(m pb.Message) {
+	if r.Lead != None {
+		zap.S().Infof("%s receive TSL: {from=%d, to=%d}, set to -> leader: %d", r, m.From, m.To, r.Lead)
+		m.To = r.Lead
+		r.msgs = append(r.msgs, m)
+	}
+}
+
+// becomeFollower transform this peer's state to Follower.
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
 	zap.S().Infof("%s state: %v -> %v, curr leader: %v", r, r.State, StateFollower, lead)
@@ -441,7 +453,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.Vote = None
 }
 
-// becomeCandidate transform this peer's state to candidate
+// becomeCandidate transform this peer's state to candidate.
 func (r *Raft) becomeCandidate() {
 	zap.S().Infof("%s state: %v -> %v, prev leader: %v", r, r.State, StateCandidate, r.Lead)
 	// Your Code Here (2A).
@@ -454,7 +466,7 @@ func (r *Raft) becomeCandidate() {
 	r.votes[r.id] = true
 }
 
-// becomeLeader transform this peer's state to leader
+// becomeLeader transform this peer's state to leader.
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
@@ -481,7 +493,7 @@ func (r *Raft) becomeLeader() {
 }
 
 // Step the entrance of handle message, see `MessageType`
-// on `eraftpb.proto` for what msgs should be handled
+// on `eraftpb.proto` for what msgs should be handled.
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	if _, ok := r.Prs[r.id]; !ok && m.MsgType == pb.MessageType_MsgTimeoutNow {
@@ -490,9 +502,6 @@ func (r *Raft) Step(m pb.Message) error {
 	if m.Term > r.Term {
 		r.leadTransferee = None
 		r.becomeFollower(m.Term, None)
-	}
-	if m.MsgType == pb.MessageType_MsgTransferLeader {
-		zap.S().Debugf("%s receive TSL: {from=%d}", r, m.From)
 	}
 	var err error
 	switch r.State {
@@ -525,10 +534,7 @@ func (r *Raft) stepFollower(m pb.Message) error {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 	case pb.MessageType_MsgTransferLeader:
-		if r.Lead == None {
-			m.To = r.Lead
-			r.msgs = append(r.msgs, m)
-		}
+		r.redirectTransfer(m)
 	case pb.MessageType_MsgTimeoutNow:
 		r.doElection()
 	}
@@ -563,11 +569,7 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 	case pb.MessageType_MsgTransferLeader:
-		if r.Lead != None {
-			zap.S().Debugf("%s receive TSL: {from=%d, to=%d}, change to lead: %d", r, m.From, m.To, r.Lead)
-			m.To = r.Lead
-			r.msgs = append(r.msgs, m)
-		}
+		r.redirectTransfer(m)
 	case pb.MessageType_MsgTimeoutNow:
 	}
 	return nil
@@ -926,7 +928,7 @@ func (r *Raft) handleTransferLeader(m pb.Message) {
 	if _, ok := r.Prs[m.From]; !ok {
 		return
 	}
-	zap.S().Infof("%s update transferee: %d -> %d", r.transferElapsed, m.From)
+	zap.S().Infof("%s set transferee: %d -> %d", r, r.transferElapsed, m.From)
 	r.leadTransferee = m.From
 	r.transferElapsed = 0
 	if r.Prs[m.From].Match == r.RaftLog.LastIndex() {
